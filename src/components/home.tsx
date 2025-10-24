@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { encryptText, decryptText } from "../lib/crypto";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Button } from "./ui/button";
@@ -17,7 +18,11 @@ function Home() {
   const [jobUrl, setJobUrl] = useState("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [lastSavedResume, setLastSavedResume] = useState<{ name: string; content: string; savedAt: number } | null>(null);
+  const [persistEnabled, setPersistEnabled] = useState<boolean>(true);
   const [apiKey, setApiKey] = useState("");
+  const [encryptedApiKey, setEncryptedApiKey] = useState<string | null>(null);
+  const [passphrase, setPassphrase] = useState("");
+  const [isApiUnlocked, setIsApiUnlocked] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [extractedSkills, setExtractedSkills] = useState<string[]>([]);
@@ -35,9 +40,11 @@ function Home() {
         const text = event.target?.result as string || "";
         setOriginalContent(text);
         try {
-          const item = { name: file.name, content: text, savedAt: Date.now() };
-          localStorage.setItem("resume_wizard_last_resume", JSON.stringify(item));
-          setLastSavedResume(item);
+          if (persistEnabled) {
+            const item = { name: file.name, content: text, savedAt: Date.now() };
+            localStorage.setItem("resume_wizard_last_resume", JSON.stringify(item));
+            setLastSavedResume(item);
+          }
         } catch (err) {
           // ignore localStorage errors
         }
@@ -48,6 +55,13 @@ function Home() {
 
   useEffect(() => {
     try {
+      // Load persistence preference first; default true
+      const rawPersist = localStorage.getItem("resume_wizard_persistence");
+      const shouldPersist = rawPersist === null ? true : rawPersist === '1';
+      setPersistEnabled(shouldPersist);
+
+      if (!shouldPersist) return;
+
       const raw = localStorage.getItem("resume_wizard_last_resume");
       if (raw) {
         const parsed = JSON.parse(raw) as { name: string; content: string; savedAt: number };
@@ -65,9 +79,13 @@ function Home() {
         }
       }
 
-      // Load persisted API key if present
-      const storedKey = localStorage.getItem("resume_wizard_api_key");
-      if (storedKey) setApiKey(storedKey);
+      // Load persisted encrypted API key if present
+      const storedEnc = localStorage.getItem("resume_wizard_api_key_enc");
+      if (storedEnc) {
+        setEncryptedApiKey(storedEnc);
+        setApiKey("");
+        setIsApiUnlocked(false);
+      }
     } catch (err) {
       // ignore parse errors
     }
@@ -77,6 +95,7 @@ function Home() {
   const clearLastSavedResume = () => {
     try {
       localStorage.removeItem("resume_wizard_last_resume");
+      localStorage.removeItem("resume_wizard_api_key_enc");
     } catch (err) {
       // ignore
     }
@@ -110,7 +129,8 @@ function Home() {
       // to that specific model or the API version differs. Try to list
       // available models and pick a Gemini model or any model that supports
       // generateContent. Fall back to the original value if listing fails.
-      let chosenModelName: string = "gemini-2.5-flash";
+      const defaultModelFromEnv = (import.meta as any).env?.VITE_GA_MODEL || "gemini-2.5-flash";
+      let chosenModelName: string = defaultModelFromEnv;
       try {
         if (typeof (genAI as any).listModels === "function") {
           const listResp = await (genAI as any).listModels();
@@ -410,30 +430,111 @@ IMPORTANT: Return the complete LaTeX document with all sections, properly format
                     type="password"
                     placeholder="Enter your API key"
                     value={apiKey}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setApiKey(v);
-                      try {
-                        if (v) localStorage.setItem("resume_wizard_api_key", v);
-                        else localStorage.removeItem("resume_wizard_api_key");
-                      } catch (err) {
-                        // ignore storage errors
-                      }
-                    }}
+                    onChange={(e) => setApiKey(e.target.value)}
                     className="font-mono text-sm"
                   />
+                  <div className="mt-2 text-xs">
+                    <label className="block text-xs text-slate-600 mb-1">Passphrase (used to encrypt your key)</label>
+                    <Input
+                      id="api-pass"
+                      type="password"
+                      placeholder="Enter a passphrase"
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      className="font-mono text-sm"
+                    />
+                  </div>
                   <div className="flex gap-2 mt-2">
-                    <Button size="sm" variant="outline" onClick={() => {
-                      try { navigator.clipboard.writeText(apiKey || ""); } catch (e) {}
-                    }}>
-                      Copy Key
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => {
-                      try { localStorage.removeItem("resume_wizard_api_key"); } catch (e) {}
-                      setApiKey("");
-                    }}>
-                      Clear Key
-                    </Button>
+                    {!encryptedApiKey ? (
+                      <>
+                        <Button size="sm" variant="outline" onClick={async () => {
+                          try { await navigator.clipboard.writeText(apiKey || ""); } catch (e) {}
+                        }}>
+                          Copy Key
+                        </Button>
+                        <Button size="sm" variant="default" onClick={async () => {
+                          if (!apiKey) return alert('Enter your API key first');
+                          if (!passphrase) return alert('Enter a passphrase to encrypt the key');
+                          try {
+                            const enc = await encryptText(apiKey, passphrase);
+                            localStorage.setItem('resume_wizard_api_key_enc', enc);
+                            setEncryptedApiKey(enc);
+                            setIsApiUnlocked(true);
+                            alert('API key encrypted and saved locally');
+                          } catch (err: any) {
+                            alert('Failed to encrypt and save key: ' + (err?.message || String(err)));
+                          }
+                        }}>
+                          Encrypt & Save Key
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setApiKey("")}>Clear Key</Button>
+                      </>
+                    ) : (
+                      <>
+                        {!isApiUnlocked ? (
+                          <>
+                            <Button size="sm" variant="default" onClick={async () => {
+                              if (!passphrase) return alert('Enter your passphrase to unlock');
+                              try {
+                                const plain = await decryptText(encryptedApiKey, passphrase);
+                                setApiKey(plain);
+                                setIsApiUnlocked(true);
+                              } catch (err: any) {
+                                alert('Failed to decrypt key: ' + (err?.message || String(err)));
+                              }
+                            }}>Unlock Saved Key</Button>
+                            <Button size="sm" variant="ghost" onClick={() => {
+                              try { localStorage.removeItem('resume_wizard_api_key_enc'); } catch (e) {}
+                              setEncryptedApiKey(null); setIsApiUnlocked(false); setApiKey("");
+                            }}>Clear Encrypted Key</Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button size="sm" variant="outline" onClick={async () => {
+                              try { await navigator.clipboard.writeText(apiKey || ""); } catch (e) {}
+                            }}>Copy Key</Button>
+                            <Button size="sm" variant="default" onClick={async () => {
+                              // Re-encrypt with current passphrase
+                              if (!passphrase) return alert('Enter your passphrase to re-encrypt');
+                              try {
+                                const enc = await encryptText(apiKey, passphrase);
+                                localStorage.setItem('resume_wizard_api_key_enc', enc);
+                                setEncryptedApiKey(enc);
+                                alert('API key saved');
+                              } catch (err: any) {
+                                alert('Failed to encrypt key: ' + (err?.message || String(err)));
+                              }
+                            }}>Save Encrypted</Button>
+                            <Button size="sm" variant="ghost" onClick={() => { try { localStorage.removeItem('resume_wizard_api_key_enc'); } catch (e) {}; setEncryptedApiKey(null); setApiKey(""); setIsApiUnlocked(false); }}>Clear Encrypted Key</Button>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <div className="mt-3 flex items-center gap-2">
+                    <input
+                      id="persist-toggle"
+                      type="checkbox"
+                      checked={persistEnabled}
+                      onChange={(e) => {
+                        const v = e.target.checked;
+                        setPersistEnabled(v);
+                        try {
+                          if (v) localStorage.setItem("resume_wizard_persistence", '1');
+                          else localStorage.setItem("resume_wizard_persistence", '0');
+                          if (!v) {
+                            // clear stored resume/key when disabling persistence
+                            try { localStorage.removeItem("resume_wizard_last_resume"); } catch (e) {}
+                            try { localStorage.removeItem("resume_wizard_api_key_enc"); } catch (e) {}
+                            setLastSavedResume(null);
+                          }
+                        } catch (err) {
+                          // ignore
+                        }
+                      }}
+                      className="w-4 h-4"
+                    />
+                    <label htmlFor="persist-toggle" className="text-xs text-slate-600">Enable local persistence (resume & API key)</label>
                   </div>
                   <p className="text-xs text-slate-500 leading-relaxed">
                     Get your free API key from{" "}
