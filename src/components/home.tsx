@@ -55,8 +55,45 @@ function Home() {
 
     try {
       const genAI = new GoogleGenerativeAI(apiKey);
-      // Use gemini-1.5-flash for free tier
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+      // Choose a model dynamically when possible. Many users see 404 for
+      // hard-coded model names because their API/account doesn't have access
+      // to that specific model or the API version differs. Try to list
+      // available models and pick a Gemini model or any model that supports
+      // generateContent. Fall back to the original value if listing fails.
+      let chosenModelName: string = "gemini-2.5-flash";
+      try {
+        if (typeof (genAI as any).listModels === "function") {
+          const listResp = await (genAI as any).listModels();
+          const modelsArr = Array.isArray(listResp)
+            ? listResp
+            : (listResp && (listResp.models || listResp.model || []));
+
+          if (Array.isArray(modelsArr) && modelsArr.length > 0) {
+            // Look for a gemini model that supports generateContent
+            const found = modelsArr.find((m: any) => {
+              const name = m.name || m.model || "";
+              const methods = m.supportedMethods || m.methods || [];
+              return /gemini/i.test(name) && (methods.includes("generateContent") || methods.includes("generate"));
+            });
+            if (found) {
+              chosenModelName = found.name || found.model;
+            } else {
+              // fallback: first model that advertises generateContent
+              const anyGen = modelsArr.find((m: any) => (m.supportedMethods || m.methods || []).includes("generateContent"));
+              if (anyGen) chosenModelName = anyGen.name || anyGen.model;
+            }
+          }
+        }
+      } catch (listErr) {
+        // Keep the original fallback and log the listing error. The 404
+        // likely comes from using a model not available for your API key.
+        // We'll continue with the chosenModelName fallback.
+        // eslint-disable-next-line no-console
+        console.warn("Could not list models:", listErr);
+      }
+
+      const model = genAI.getGenerativeModel({ model: chosenModelName });
 
       setProgress(20);
 
