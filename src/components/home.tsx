@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Button } from "./ui/button";
@@ -16,6 +16,7 @@ function Home() {
   const [jobDescription, setJobDescription] = useState("");
   const [jobUrl, setJobUrl] = useState("");
   const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [lastSavedResume, setLastSavedResume] = useState<{ name: string; content: string; savedAt: number } | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -27,13 +28,61 @@ function Home() {
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setResumeFile(e.target.files[0]);
+      const file = e.target.files[0];
+      setResumeFile(file);
       const reader = new FileReader();
       reader.onload = (event) => {
-        setOriginalContent(event.target?.result as string || "");
+        const text = event.target?.result as string || "";
+        setOriginalContent(text);
+        try {
+          const item = { name: file.name, content: text, savedAt: Date.now() };
+          localStorage.setItem("resume_wizard_last_resume", JSON.stringify(item));
+          setLastSavedResume(item);
+        } catch (err) {
+          // ignore localStorage errors
+        }
       };
-      reader.readAsText(e.target.files[0]);
+      reader.readAsText(file);
     }
+  };
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("resume_wizard_last_resume");
+      if (raw) {
+        const parsed = JSON.parse(raw) as { name: string; content: string; savedAt: number };
+        setLastSavedResume(parsed);
+        // If no file is currently uploaded, create a File from the saved content so the flow works
+        if (!resumeFile && parsed && parsed.content) {
+          try {
+            const f = new File([parsed.content], parsed.name, { type: "text/plain" });
+            setResumeFile(f);
+            setOriginalContent(parsed.content);
+          } catch (err) {
+            // Some environments may not support File constructor; silently ignore
+            setOriginalContent(parsed.content);
+          }
+        }
+      }
+
+      // Load persisted API key if present
+      const storedKey = localStorage.getItem("resume_wizard_api_key");
+      if (storedKey) setApiKey(storedKey);
+    } catch (err) {
+      // ignore parse errors
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const clearLastSavedResume = () => {
+    try {
+      localStorage.removeItem("resume_wizard_last_resume");
+    } catch (err) {
+      // ignore
+    }
+    setLastSavedResume(null);
+    setResumeFile(null);
+    setOriginalContent("");
   };
 
   const handleTailorResume = async () => {
@@ -41,7 +90,7 @@ function Home() {
       alert("Please provide a job description or URL");
       return;
     }
-    if (!resumeFile) {
+    if (!(resumeFile || originalContent)) {
       alert("Please upload your resume");
       return;
     }
@@ -266,6 +315,33 @@ IMPORTANT: Return the complete LaTeX document with all sections, properly format
                     <p className="text-sm text-slate-500">LaTeX files (.tex) only • Max 10MB</p>
                   </label>
                 </div>
+                {lastSavedResume && (
+                  <div className="mt-4 text-sm text-slate-600 text-left max-w-xl mx-auto">
+                    <div className="flex items-center justify-between bg-slate-50 p-3 rounded-md border border-slate-200">
+                      <div>
+                        <div className="font-medium text-slate-800">Last saved resume</div>
+                        <div className="text-xs text-slate-500">{lastSavedResume.name} • {new Date(lastSavedResume.savedAt).toLocaleString()}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" variant="outline" onClick={() => {
+                          // Re-create File and set as current
+                          try {
+                            const f = new File([lastSavedResume.content], lastSavedResume.name, { type: "text/plain" });
+                            setResumeFile(f);
+                          } catch (err) {
+                            // ignore
+                          }
+                          setOriginalContent(lastSavedResume.content);
+                        }}>
+                          Use Saved
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={clearLastSavedResume}>
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -308,7 +384,7 @@ IMPORTANT: Return the complete LaTeX document with all sections, properly format
 
             <Button
               onClick={handleTailorResume}
-              disabled={isProcessing || !resumeFile || (!jobDescription && !jobUrl)}
+              disabled={isProcessing || !(resumeFile || originalContent) || (!jobDescription && !jobUrl)}
               className="w-full h-14 text-lg font-semibold bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg"
               size="lg"
             >
@@ -334,9 +410,31 @@ IMPORTANT: Return the complete LaTeX document with all sections, properly format
                     type="password"
                     placeholder="Enter your API key"
                     value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setApiKey(v);
+                      try {
+                        if (v) localStorage.setItem("resume_wizard_api_key", v);
+                        else localStorage.removeItem("resume_wizard_api_key");
+                      } catch (err) {
+                        // ignore storage errors
+                      }
+                    }}
                     className="font-mono text-sm"
                   />
+                  <div className="flex gap-2 mt-2">
+                    <Button size="sm" variant="outline" onClick={() => {
+                      try { navigator.clipboard.writeText(apiKey || ""); } catch (e) {}
+                    }}>
+                      Copy Key
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => {
+                      try { localStorage.removeItem("resume_wizard_api_key"); } catch (e) {}
+                      setApiKey("");
+                    }}>
+                      Clear Key
+                    </Button>
+                  </div>
                   <p className="text-xs text-slate-500 leading-relaxed">
                     Get your free API key from{" "}
                     <a 
